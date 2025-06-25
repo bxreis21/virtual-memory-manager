@@ -51,7 +51,7 @@ class Memory_Manager:
         self.logic_addresses = logic_addresses
 
         self.page_table = [None] * 16
-        self.tlb = [None, None]
+        self.tlb = [] # lista para TLB
 
         self.physical_memory_pages_initial_addresses = [
             0 << 12,
@@ -60,7 +60,12 @@ class Memory_Manager:
             3 << 12,
         ]
 
-        self.history = []
+        self.history = [] # Política FIFO
+
+        # Estatísticas
+        self.total_addresses = 0
+        self.page_faults = 0
+        self.tlb_hits = 0
 
     @staticmethod
     def get_page(address):
@@ -87,26 +92,42 @@ class Memory_Manager:
 
             self.physical_memory.clear_page(memory_page_now_free)
             self.page_table[page] = memory_page_now_free
+            self.page_table[page_out] = None
+
+            # atualizar TLB
+            self.tlb = [entry for entry in self.tlb if entry[0] != page_out]
 
         return self.page_table[page]
                 
 
     def get_page_from_secondary(self, page):
-        self.update_page_table(page)
-        memory_address = self.page_table[page]
+        self.page_faults += 1 # contabilizar page fault
+
+        frame_address = self.update_page_table(page)
 
         page_from_secondary = self.secondary_memory.access_frame(page)
 
-        # print("pfs:", type(page_from_secondary))
-        #print("pfs len:", len(page_from_secondary.keys()))
-
-        self.physical_memory.save_page(memory_address, page_from_secondary)
+        self.physical_memory.save_page(frame_address, page_from_secondary)
 
         print()
-        print("memory page allocated:", self.page_table[page] // 4096)
-        print("page in:", page)
+        print("page fault - Loaded page:", page)
+        print("memory page allocated:", frame_address // 4096)
+        #print("page in:", page)
+
+        # atualiza TLB (FIFO)
+        if len(self.tlb) >= 2:
+            removed = self.tlb.pop(0)
+            print(f"TLB FULL. Removed entry: page {removed[0]}")
+        
+        self.tlb.append((page, frame_address))
         
 
+    def check_tlb(self, page):
+        # verifica se a página está na TLB e retorna frame_address se encontrar
+        for p, frame_addr in self.tlb:
+            if p == page:
+                return frame_addr
+        return None
 
     def start_simulation(self):
 
@@ -115,6 +136,8 @@ class Memory_Manager:
         print("#######################################################################")
 
         for index, address in enumerate(self.logic_addresses):
+
+            self.total_addresses += 1
 
             current_address_page = self.get_page(address)
             current_address_shift = self.get_shifting(address)
@@ -126,21 +149,50 @@ class Memory_Manager:
             print("page: ", current_address_page)
             print("shift: ", current_address_shift)
 
-            if self.page_table[current_address_page] != None:
-                print("in memory")
-                print("memory address: ", self.page_table[current_address_page] + current_address_shift)
-                print("value: ", self.physical_memory.access(self.page_table[current_address_page] + current_address_shift))
+            frame_address = self.check_tlb(current_address_page)
+            if frame_address is not None:
+                self.tlb_hits += 1
+                print("TLB HIT")
+                physical_address = frame_address + current_address_shift
+                print("physical address:", physical_address)
+                value_byte = self.physical_memory.access(physical_address)
+                print("value:", value_byte[0]) # valor o inteiro do byte armazenado no endereço
 
             else:
-                print()
-                print("out of memory")
-                self.get_page_from_secondary(current_address_page)
-                print("memory address: ", self.page_table[current_address_page] + current_address_shift)
-                print("value: ", self.physical_memory.access(self.page_table[current_address_page] + current_address_shift))
+                print("TLB MISS")
+                if self.page_table[current_address_page] is not None:
+                    # página não está na TLB. Atualizar TLB
+                    frame_address = self.page_table[current_address_page]
+                    print("in memory")
+                    physical_address = frame_address + current_address_shift
+                    print("physical address:", physical_address)
+                    value_byte = self.physical_memory.access(physical_address)
+                    print("value:", value_byte[0]) # valor o inteiro do byte armazenado no endereço
+
+                    # atualizar TLB
+                    if len(self.tlb) >= 2:
+                        removed = self.tlb.pop(0)
+                        print(f"TLB full. Removed entry: page {removed[0]}")
+
+                    self.tlb.append((current_address_page, frame_address))
+
+                else:
+                    # page fault
+                    print("page fault - page not in memory...loading from secondary memory")
+                    self.get_page_from_secondary(current_address_page)
+                    frame_address = self.page_table[current_address_page]
+                    physical_address = frame_address + current_address_shift
+                    print("physical address:", physical_address)
+                    value_byte = self.physical_memory.access(physical_address)
+                    print("value:", value_byte[0]) # valor o inteiro do byte armazenado no endereço
+
 
         print()
         print(f"---------------------- END ----------------------")
-        
+        print(f"Total addresses translated: {self.total_addresses}")
+        print(f"Page fault rate: {(self.page_faults / self.total_addresses)*100:.2f}%")
+        print(f"TLB hit rate: {(self.tlb_hits / self.total_addresses)*100:.2f}%")
+
 if __name__ == "__main__":
 
     SECONDARY_MEMORY_PATH = 'BACKING_STORE.bin'
